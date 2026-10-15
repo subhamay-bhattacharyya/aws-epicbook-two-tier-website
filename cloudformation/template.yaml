@@ -1,28 +1,40 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
-Description: 'Root CloudFormation template that invokes a nested S3 bucket stack'
+Description: |
+  Root CloudFormation template for Traditional 3-Tier WordPress website Deployment on AWS. Creates:
+  - Amazon VPC with DNS support and hostnames enabled (via nested VPC stack)
+  - Internet Gateway attached to the VPC (via nested VPC stack)
+  - Two public subnets with a shared route table to the Internet Gateway (via nested subnets stack)
+  - Two private application subnets with a shared route table and no Internet route (via nested subnets stack)
+  - Two private database subnets with a shared route table and no Internet route (via nested subnets stack)
+  - Web security group for the Application Load Balancer (via nested security groups stack)
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: "Nested Stack Configuration"
-        Parameters:
-          - NestedStacksS3BucketName
-      - Label:
-          default: "Common Bucket Configuration"
+          default: "Project Configuration"
         Parameters:
           - ProjectName
           - Environment
       - Label:
-          default: "Bucket Configuration"
+          default: "Nested Stack Configuration"
         Parameters:
-          - BucketBaseName
+          - NestedStacksS3BucketName
+      # - Label:
+      #     default: "KMS Encryption"
+      #   Parameters:
+      #     - KmsKey
       - Label:
-          default: "Encryption Configuration"
+          default: "VPC Configuration"
         Parameters:
-          - KmsKey
-          - EnableBucketKey
+          - VPCCidrBlock
+      - Label:
+          default: "Security Group Configuration"
+        Parameters:
+          - WebSecurityGroupBaseName
+          - AppSecurityGroupBaseName
+          - DatabaseSecurityGroupBaseName
       - Label:
           default: "Advanced Configuration"
         Parameters:
@@ -30,18 +42,22 @@ Metadata:
     ParameterLabels:
       NestedStacksS3BucketName:
         default: "S3 Bucket Name"
+      # KmsKey:
+      #   default: "KMS Key (ARN / Alias)"
       ProjectName:
         default: "Project Name"
-      BucketBaseName:
-        default: "Bucket Base Name"
       Environment:
         default: "Environment"
+      VPCCidrBlock:
+        default: "VPC CIDR block (e.g., 10.0.0.0/16)"
+      WebSecurityGroupBaseName:
+        default: "Web Security Group Base Name"
+      AppSecurityGroupBaseName:
+        default: "Base name for the app security group (to be attached to the application tier)"
+      DatabaseSecurityGroupBaseName:
+        default: "Base name for the database security group (to be attached to the database tier)"
       CiSuffix:
         default: "CI Suffix"
-      KmsKey:
-        default: "KMS Key (ARN / Alias)"
-      EnableBucketKey:
-        default: "Enable S3 Bucket Key"
 
 Parameters:
   NestedStacksS3BucketName:
@@ -55,83 +71,387 @@ Parameters:
 
   ProjectName:
     Type: String
-    Default: "ztc-etl"
+    Default: "epicbook-app"
     Description: "Project name to use as a bucket prefix"
     MinLength: 1
     MaxLength: 20
     AllowedPattern: "^[a-z0-9-]+$"
     ConstraintDescription: "Project name must be lowercase letters, numbers, and hyphens only"
 
-  BucketBaseName:
-    Type: String
-    Default: "csv-raw-data"
-    MinLength: 1
-    MaxLength: 20
-    AllowedPattern: "^[a-z0-9.-]+$"
-    ConstraintDescription: "Bucket base name must be 1-20 characters and can only contain lowercase letters, numbers, hyphens, and dots"
-    Description: Base name for the S3 bucket (account ID, environment, and region will be appended)
-
-  KmsKey:
-    Type: String
-    Default: ""
-    AllowedPattern: "^(alias/[a-zA-Z0-9_-]+|arn:aws:kms:[a-z0-9-]+:[0-9]+:key/[a-zA-Z0-9-]+|[a-zA-Z0-9_-]+)?$"
-    ConstraintDescription: "KMS Key can be a key name (e.g., my-key, auto-converted to alias/my-key), a KMS key alias (e.g., alias/my-key), or a full KMS key ARN (e.g., arn:aws:kms:region:account:key/key-id), or leave empty for no KMS encryption"
-    Description: "Optional KMS Key for S3 bucket encryption. Accepts: key name (my-key), alias (alias/my-key), or ARN (arn:aws:kms:region:account:key/key-id). Plain key names are auto-converted to aliases."
-
-  EnableBucketKey:
-    Type: String
-    Default: "false"
-    AllowedValues:
-      - "true"
-      - "false"
-    Description: "Enable S3 Bucket Key for KMS encryption cost optimization (only applicable when KmsKey is provided)"
+  # KmsKey:
+  #   Type: String
+  #   Default: "SB-KMS"
+  #   AllowedPattern: "^(alias/[a-zA-Z0-9_-]+|arn:aws:kms:[a-z0-9-]+:[0-9]+:key/[a-zA-Z0-9-]+|[a-zA-Z0-9_-]+)?$"
+  #   ConstraintDescription: "KMS Key can be a key name (e.g., my-key, auto-converted to alias/my-key), a KMS key alias (e.g., alias/my-key), or a full KMS key ARN (e.g., arn:aws:kms:region:account:key/key-id), or leave empty for no KMS encryption"
+  #   Description: "Optional KMS Key for S3 bucket encryption. Accepts: key name (my-key), alias (alias/my-key), or ARN (arn:aws:kms:region:account:key/key-id). Plain key names are auto-converted to aliases."
 
   Environment:
     Type: String
     Default: devl
     Description: "Deployment environment for the S3 bucket"
 
+  VPCCidrBlock:
+    Type: String
+    Default: '10.9.0.0/16'
+    Description: CIDR block for the VPC (e.g., 10.0.0.0/16)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be valid CIDR block
+
   CiSuffix:
     Type: String
     Default: ""
     Description: "Optional CI suffix to append to the bucket name"
 
+  WebSecurityGroupBaseName:
+    Type: String
+    Default: "web-sg"
+    Description: "Base name for the web security group (Application Load Balancer), combined with the project and environment names"
+    MinLength: 1
+    MaxLength: 30
+    AllowedPattern: "^[a-z0-9-]+$"
+    ConstraintDescription: "Security group base name must be lowercase letters, numbers, and hyphens only"
+    
+  AppSecurityGroupBaseName:
+    Type: String
+    Default: "app-sg"
+    Description: "Base name for the app security group (to be attached to the application tier), combined with the project and environment names"
+    MinLength: 1
+    MaxLength: 30
+    AllowedPattern: "^[a-z0-9-]+$"
+    ConstraintDescription: "App security group base name must be lowercase letters, numbers, and hyphens only"
+
+  DatabaseSecurityGroupBaseName:
+    Type: String
+    Default: "db-sg"
+    Description: "Base name for the database security group (to be attached to the database tier), combined with the project and environment names"
+    MinLength: 1
+    MaxLength: 30
+    AllowedPattern: "^[a-z0-9-]+$"
+    ConstraintDescription: "Database security group base name must be lowercase letters, numbers, and hyphens only"
+Conditions:
+  # HasKmsKey: !Not [!Equals [!Ref KmsKey, ""]]
+  HasCiSuffix: !Not [!Equals [!Ref CiSuffix, ""]]
+
 Resources:
-  S3BucketNestedStack:
+  
+  VpcNestedStack:
     Type: AWS::CloudFormation::Stack
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Metadata:
       com.aws.cloudformation.Context:
-        why: "Invokes the nested S3 bucket CloudFormation template to create a versioned, encrypted S3 bucket with public access blocking and optional logging/website configuration"
+        why: "Invokes the nested VPC CloudFormation template to create the core networking VPC with DNS support and an attached Internet Gateway; all subnets, route tables, and gateways attach to this VPC"
         must:
           - "Nested template must be accessible at the specified S3 location"
           - "IAM principal must have s3:GetObject permission on the template S3 bucket"
-          - "CloudFormation service must have permission to assume the required IAM role for S3 and KMS operations"
     Properties:
-      TemplateURL: !Sub https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-s3-bucket/template.yaml
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-vpc/template.yaml"
       Parameters:
-        ProjectName: !Ref ProjectName
-        BucketBaseName: !Ref BucketBaseName
-        KmsKey: !Ref KmsKey
-        EnableBucketKey: !Ref EnableBucketKey
-        Environment: !Ref Environment
-        CiSuffix: !Ref CiSuffix
+          VPCCidrBlock: !Ref VPCCidrBlock
+          EnableDnsHostnames: "true"
+          EnableInternetGateway: "true"
+          VpcNameTag: !If
+            - HasCiSuffix
+            - !Sub "${ProjectName}-${Environment}-${CiSuffix}"
+            - !Sub "${ProjectName}-${Environment}"
+          Environment: !Ref Environment
       Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: ECommerceVPC
         - Key: ManagedBy
           Value: RootStack
-        - Key: NestedStackPurpose
-          Value: S3BucketCreation
+      TimeoutInMinutes: 10
 
+  PublicSubnetsNestedStack:
+    Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Invokes the nested subnets CloudFormation template to create two public subnets in the VPC created by the VPC nested stack, sharing a route table with a default route to the Internet Gateway"
+        must:
+          - "Nested template must be accessible at the specified S3 location"
+          - "IAM principal must have s3:GetObject permission on the template S3 bucket"
+          - "VpcNestedStack must complete first so that the VPC and Internet Gateway IDs are available"
+    Properties:
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-subnets/template.yaml"
+      Parameters:
+        VpcId: !GetAtt VpcNestedStack.Outputs.VPCId
+        VpcName: !If
+          - HasCiSuffix
+          - !Sub "${ProjectName}-${Environment}-${CiSuffix}"
+          - !Sub "${ProjectName}-${Environment}"
+        AvailabilityZones: "us-east-1a,us-east-1b"
+        SubnetCidrBlocks: "10.9.0.0/20, 10.9.16.0/20"
+        SubnetCount: "2"
+        SubnetQualifier: "public"
+        InternetGatewayId: !GetAtt VpcNestedStack.Outputs.InternetGatewayId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: PublicSubnets
+        - Key: ManagedBy
+          Value: RootStack
+      TimeoutInMinutes: 10
+
+  ApplicationPrivateSubnetsNestedStack:
+    Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Invokes the nested subnets CloudFormation template to create two private application subnets in the VPC created by the VPC nested stack, sharing a route table with no default route to the Internet Gateway"
+        must:
+          - "Nested template must be accessible at the specified S3 location"
+          - "IAM principal must have s3:GetObject permission on the template S3 bucket"
+          - "VpcNestedStack must complete first so that the VPC ID is available"
+    Properties:
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-subnets/template.yaml"
+      Parameters:
+        VpcId: !GetAtt VpcNestedStack.Outputs.VPCId
+        VpcName: !If
+          - HasCiSuffix
+          - !Sub "${ProjectName}-${Environment}-${CiSuffix}"
+          - !Sub "${ProjectName}-${Environment}"
+        AvailabilityZones: "us-east-1a,us-east-1b"
+        SubnetCidrBlocks: "10.9.48.0/20, 10.9.64.0/20"
+        SubnetCount: "2"
+        SubnetQualifier: "application"
+        NatGatewayHighlyAvailable: "false"
+        NatPublicSubnetIds: !Join
+          - ","
+          - - !GetAtt PublicSubnetsNestedStack.Outputs.SubnetId1
+            - !GetAtt PublicSubnetsNestedStack.Outputs.SubnetId2
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: PrivateSubnets
+        - Key: ManagedBy
+          Value: RootStack
+      TimeoutInMinutes: 10
+
+  DatabasePrivateSubnetsNestedStack:
+    Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Invokes the nested subnets CloudFormation template to create two private database subnets in the VPC created by the VPC nested stack, sharing a route table with no default route to the Internet Gateway"
+        must:
+          - "Nested template must be accessible at the specified S3 location"
+          - "IAM principal must have s3:GetObject permission on the template S3 bucket"
+          - "VpcNestedStack must complete first so that the VPC ID is available"
+    Properties:
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-subnets/template.yaml"
+      Parameters:
+        VpcId: !GetAtt VpcNestedStack.Outputs.VPCId
+        VpcName: !If
+          - HasCiSuffix
+          - !Sub "${ProjectName}-${Environment}-${CiSuffix}"
+          - !Sub "${ProjectName}-${Environment}"
+        AvailabilityZones: "us-east-1a,us-east-1b"
+        SubnetCidrBlocks: "10.9.80.0/20, 10.9.96.0/20"
+        SubnetCount: "2"
+        SubnetQualifier: "database"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: DatabaseSubnets
+        - Key: ManagedBy
+          Value: RootStack
+      TimeoutInMinutes: 10
+
+  WebSecurityGroupNestedStack:
+    Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Invokes the nested security groups CloudFormation template to create the web security group (to be attached to the Application Load Balancer) in the VPC created by the VPC nested stack"
+        must:
+          - "Nested template must be accessible at the specified S3 location"
+          - "IAM principal must have s3:GetObject permission on the template S3 bucket"
+          - "VpcNestedStack must complete first so that the VPC ID is available"
+    Properties:
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-ec2-security-group/template.yaml"
+      Parameters:
+        VpcId: !GetAtt VpcNestedStack.Outputs.VPCId
+        SecurityGroupBaseName: !Ref WebSecurityGroupBaseName
+        SecurityGroupDescription: "Security group for the web tier (Application Load Balancer)"
+        Rule1RuleSet: "WebServer"
+        Rule1SourceCidr: "0.0.0.0/0"
+        Rule2RuleSet: "None"
+        Rule3RuleSet: "None"
+        Rule4RuleSet: "None"
+        Rule5RuleSet: "None"
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: WebSecurityGroup
+        - Key: ManagedBy
+          Value: RootStack
+      TimeoutInMinutes: 10
+      
+  AppSecurityGroupNestedStack:
+    Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Invokes the nested security groups CloudFormation template to create the web security group (to be attached to the Application Load Balancer) in the VPC created by the VPC nested stack"
+        must:
+          - "Nested template must be accessible at the specified S3 location"
+          - "IAM principal must have s3:GetObject permission on the template S3 bucket"
+          - "VpcNestedStack must complete first so that the VPC ID is available"
+    Properties:
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-ec2-security-group/template.yaml"
+      Parameters:
+        VpcId: !GetAtt VpcNestedStack.Outputs.VPCId
+        SecurityGroupBaseName: !Ref AppSecurityGroupBaseName
+        SecurityGroupDescription: "Security group for the web tier (Application Load Balancer)"
+        Rule1RuleSet: "WebServer"
+        Rule1SourceSecurityGroupId: !GetAtt WebSecurityGroupNestedStack.Outputs.SecurityGroupId
+        Rule2RuleSet: "None"
+        Rule3RuleSet: "None"
+        Rule4RuleSet: "None"
+        Rule5RuleSet: "None"
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: AppSecurityGroup
+        - Key: ManagedBy
+          Value: RootStack
+      TimeoutInMinutes: 10
+
+  DatabaseSecurityGroupNestedStack:
+    Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: "Invokes the nested security groups CloudFormation template to create the database security group (to be attached to the database tier) in the VPC created by the VPC nested stack"
+        must:
+          - "Nested template must be accessible at the specified S3 location"
+          - "IAM principal must have s3:GetObject permission on the template S3 bucket"
+          - "VpcNestedStack must complete first so that the VPC ID is available"
+    Properties:
+      TemplateURL: !Sub "https://${NestedStacksS3BucketName}.s3.us-east-1.amazonaws.com/cfn-nested-aws-ec2-security-group/template.yaml"
+      Parameters:
+        VpcId: !GetAtt VpcNestedStack.Outputs.VPCId
+        SecurityGroupBaseName: !Ref DatabaseSecurityGroupBaseName
+        SecurityGroupDescription: "Security group for the database tier"
+        Rule1RuleSet: "RDSMySQL"
+        Rule1SourceSecurityGroupId: !GetAtt AppSecurityGroupNestedStack.Outputs.SecurityGroupId
+        Rule2RuleSet: "None"
+        Rule3RuleSet: "None"
+        Rule4RuleSet: "None"
+        Rule5RuleSet: "None"
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: "EpicBook Review Website"
+        - Key: Component
+          Value: DatabaseSecurityGroup
+        - Key: ManagedBy
+          Value: RootStack
+      TimeoutInMinutes: 10
 Outputs:
-  NestedStackId:
-    Description: "ID of the nested stack"
-    Value: !Ref S3BucketNestedStack
 
-  S3BucketName:
-    Description: "Name of the S3 bucket created by the nested stack"
-    Value: !GetAtt S3BucketNestedStack.Outputs.S3BucketName
+  VpcId:
+    Description: "ID of the VPC created by the nested stack"
+    Value: !GetAtt VpcNestedStack.Outputs.VPCId
 
-  S3BucketArn:
-    Description: "ARN of the S3 bucket created by the nested stack"
-    Value: !GetAtt S3BucketNestedStack.Outputs.S3BucketArn
+  InternetGatewayId:
+    Description: "ID of the Internet Gateway attached to the VPC created by the nested stack"
+    Value: !GetAtt VpcNestedStack.Outputs.InternetGatewayId
+
+  PublicSubnet1Arn:
+    Description: "ARN of public subnet 1 created by the nested subnets stack"
+    Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${PublicSubnetsNestedStack.Outputs.SubnetId1}"
+
+  PublicSubnet2Id:
+    Description: "ID of public subnet 2 created by the nested subnets stack"
+    Value: !GetAtt PublicSubnetsNestedStack.Outputs.SubnetId2
+
+  PublicSubnet2Arn:
+    Description: "ARN of public subnet 2 created by the nested subnets stack"
+    Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${PublicSubnetsNestedStack.Outputs.SubnetId2}"
+
+  ApplicationPrivateSubnet1Id:
+    Description: "ID of application private subnet 1 created by the nested subnets stack"
+    Value: !GetAtt ApplicationPrivateSubnetsNestedStack.Outputs.SubnetId1
+
+  ApplicationPrivateSubnet1Arn:
+    Description: "ARN of application private subnet 1 created by the nested subnets stack"
+    Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${ApplicationPrivateSubnetsNestedStack.Outputs.SubnetId1}"
+
+  ApplicationPrivateSubnet2Id:
+    Description: "ID of application private subnet 2 created by the nested subnets stack"
+    Value: !GetAtt ApplicationPrivateSubnetsNestedStack.Outputs.SubnetId2
+
+  ApplicationPrivateSubnet2Arn:
+    Description: "ARN of application private subnet 2 created by the nested subnets stack"
+    Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${ApplicationPrivateSubnetsNestedStack.Outputs.SubnetId2}"
+
+  DatabaseSubnet1Id:
+    Description: "ID of database subnet 1 created by the nested subnets stack"
+    Value: !GetAtt DatabasePrivateSubnetsNestedStack.Outputs.SubnetId1
+
+  DatabaseSubnet1Arn:
+    Description: "ARN of database subnet 1 created by the nested subnets stack"
+    Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${DatabasePrivateSubnetsNestedStack.Outputs.SubnetId1}"
+
+  DatabaseSubnet2Id:
+    Description: "ID of database subnet 2 created by the nested subnets stack"
+    Value: !GetAtt DatabasePrivateSubnetsNestedStack.Outputs.SubnetId2
+
+  DatabaseSubnet2Arn:
+    Description: "ARN of database subnet 2 created by the nested subnets stack"
+    Value: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${DatabasePrivateSubnetsNestedStack.Outputs.SubnetId2}"
+
+  WebSecurityGroupId:
+    Description: "ID of the web security group created by the nested security groups stack (attach to the Application Load Balancer)"
+    Value: !GetAtt WebSecurityGroupNestedStack.Outputs.SecurityGroupId
+
+  WebSecurityGroupName:
+    Description: "Name of the web security group created by the nested security groups stack (attach to the Application Load Balancer)"
+    Value: !GetAtt WebSecurityGroupNestedStack.Outputs.SecurityGroupName
+
+  AppSecurityGroupId:
+    Description: "ID of the application tier security group created by the nested security groups stack"
+    Value: !GetAtt AppSecurityGroupNestedStack.Outputs.SecurityGroupId
+
+  AppSecurityGroupName:
+    Description: "Name of the application tier security group created by the nested security groups stack"
+    Value: !GetAtt AppSecurityGroupNestedStack.Outputs.SecurityGroupName
+
+  DatabaseSecurityGroupId:
+    Description: "ID of the database tier security group created by the nested security groups stack"
+    Value: !GetAtt DatabaseSecurityGroupNestedStack.Outputs.SecurityGroupId
+
+  DatabaseSecurityGroupName:
+    Description: "Name of the database tier security group created by the nested security groups stack"
+    Value: !GetAtt DatabaseSecurityGroupNestedStack.Outputs.SecurityGroupName
